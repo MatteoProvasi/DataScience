@@ -1,0 +1,136 @@
+---
+title: "Esercizio Open Data Lombardia"
+author: "Matteo Provasi"
+date: "29 maggio 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r pressure, echo=FALSE}
+setwd("C:\\Users\\prowm\\OneDrive\\Desktop\\Data Science\\Sistemi Informativi")
+DRG = read.csv("Dati_regionali_ricoveri_per_DRG.csv", sep = ";", header = TRUE)
+indicatori2 = read.csv("Performance_degli_Ospedali.csv", sep = ";", header = TRUE)
+
+library(sqldf)
+
+temp2 = DRG
+smallDRG = DRG[, c(1:3, 5, 7, 9)]
+smallDRG = na.omit(smallDRG)
+names(smallDRG) = c("Anno", "CodiceDRG", "DRG", "Casi0", "Casi1", "GG")
+
+cod = sqldf('SELECT Anno, CodiceDRG, DRG, SUM(Casi0) AS Casi0, SUM(Casi1) AS Casi1, SUM(GG) AS GG
+             FROM smallDRG
+             GROUP BY CodiceDRG, Anno
+             HAVING GG > 10000')
+
+degenzaMedia = cod$GG / (cod$Casi0 + cod$Casi1)
+
+cod = cbind(cod, degenzaMedia)
+
+
+cod2013 = cod[which(cod$Anno == 2013), ]
+cod2014 = cod[which(cod$Anno == 2014), ]
+cod2015 = cod[which(cod$Anno == 2015), ]
+cod2016 = cod[which(cod$Anno == 2016), ]
+win.graph()
+#par(mfrow = c(2, 2))
+plot(x = cod2013$CodiceDRG, y = cod2013$degenzaMedia, pch = 19, type = "p", 
+     xlab = "Codice DRG", ylab = "Degenza Media", main = "Numero di giorni di degenza media per 
+     malattia nel 2013")
+abline(h = mean(cod2013$degenzaMedia), col = "blue", lwd = 3, lty = "dotted")
+abline(h = max(cod2013$degenzaMedia), col = "red", lwd = 2, lty = 3)
+abline(h = min(cod2013$degenzaMedia), col = "green", lwd = 2, lty = 3)
+#text("Min: REVISIONE DI SOSTITUZIONE DELL'ANCA O DEL GINOCCHIO - ", x=300, y=40, cex = 0.5)
+#text(paste(round(min(cod2013$degenzaMedia)), 2), x = 600, y = 40, cex = 0.5)
+
+plot(x = cod2014$CodiceDRG, y = cod2014$degenzaMedia, pch = 19, type = "p", 
+     xlab = "Codice DRG", ylab = "Degenza Media", main = "Numero di giorni di degenza media per 
+     malattia nel 2014")
+abline(h = mean(cod2014$degenzaMedia), col = "blue", lwd = 3, lty = "dotted")
+abline(h = max(cod2014$degenzaMedia), col = "red", lwd = 2, lty = 3)
+abline(h = min(cod2014$degenzaMedia), col = "green", lwd = 2, lty = 3)
+
+plot(x = cod2015$CodiceDRG, y = cod2015$degenzaMedia, pch = 19, type = "p", 
+     xlab = "Codice DRG", ylab = "Degenza Media", main = "Numero di giorni di degenza media per 
+     malattia nel 2015")
+abline(h = mean(cod2015$degenzaMedia), col = "blue", lwd = 3, lty = "dotted")
+abline(h = max(cod2015$degenzaMedia), col = "red", lwd = 2, lty = 3)
+abline(h = min(cod2015$degenzaMedia), col = "green", lwd = 2, lty = 3)
+
+plot(x = cod2016$CodiceDRG, y = cod2016$degenzaMedia, pch = 19, type = "p", 
+     xlab = "Codice DRG", ylab = "Degenza Media", main = "Numero di giorni di degenza media per 
+     malattia nel 2016")
+abline(h = mean(cod2016$degenzaMedia), col = "blue", lwd = 3, lty = "dotted")
+abline(h = max(cod2016$degenzaMedia), col = "red", lwd = 2, lty = 3)
+abline(h = min(cod2016$degenzaMedia), col = "green", lwd = 2, lty = 3)
+par(mfrow = c(1, 1))
+
+
+min(cod2013$degenzaMedia); min(cod2014$degenzaMedia); min(cod2015$degenzaMedia)
+min(cod2016$degenzaMedia)
+
+max(cod2013$degenzaMedia); max(cod2014$degenzaMedia); max(cod2015$degenzaMedia)
+max(cod2016$degenzaMedia)
+
+mean(cod2013$degenzaMedia); mean(cod2014$degenzaMedia); mean(cod2015$degenzaMedia)
+mean(cod2016$degenzaMedia)
+
+totcod = sqldf('SELECT a.Anno, a.CodiceDRG, a.DRG, a.Casi0, a.Casi1, a.GG, a.degenzaMedia, 
+                       b.degenzaMedia AS DegenzaMedia2014, 
+                       c.degenzaMedia AS DegenzaMedia2015,
+                       d.degenzaMedia AS DegenzaMedia2016
+                FROM cod2013 AS a, cod2014 AS b, cod2015 AS c, cod2016 AS d
+                WHERE a.CodiceDRG = b.CodiceDRG AND a.CodiceDRG = c.CodiceDRG AND 
+                      a.CodiceDRG = d.CodiceDRG')
+eff = totcod$degenzaMedia - totcod$DegenzaMedia2016
+totcod = cbind(totcod, eff)
+
+best = totcod[order(-totcod$eff), ]
+worst = totcod[order(totcod$eff), ]
+win.graph()
+par(mfrow = c(1, 1))
+plot(x = c(2013:2016), y = c(best$degenzaMedia[1], best$DegenzaMedia2014[1], best$DegenzaMedia2015[1], 
+                             best$DegenzaMedia2016[1]), type = "o", pch = 19, col = 1, 
+     xlab = "Anno", ylab = "Degenza media", xaxt="n",
+     main = "Cinque maggiori miglioramenti in termini di degenza media", 
+     ylim = c(min(best[1:5, 7:10]), max(best[1:5, 7:10])))
+axis(1, xaxp=c(2013, 2016, 3), las=1)
+lines(x = c(2013:2016), y = c(best$degenzaMedia[2], best$DegenzaMedia2014[2], best$DegenzaMedia2015[2], 
+                             best$DegenzaMedia2016[2]), type = "o", pch = 19, col = 2)
+lines(x = c(2013:2016), y = c(best$degenzaMedia[3], best$DegenzaMedia2014[3], best$DegenzaMedia2015[3], 
+                             best$DegenzaMedia2016[3]), type = "o", pch = 19, col = 3)
+lines(x = c(2013:2016), y = c(best$degenzaMedia[4], best$DegenzaMedia2014[4], best$DegenzaMedia2015[4], 
+                             best$DegenzaMedia2016[4]), type = "o", pch = 19, col = 4)
+lines(x = c(2013:2016), y = c(best$degenzaMedia[5], best$DegenzaMedia2014[5], best$DegenzaMedia2015[5], 
+                             best$DegenzaMedia2016[5]), type = "o", pch = 19, col = 5)
+legend(2013, 13, legend = c("DIST. NUTRIZIONE E METABOLISMO,ETA' >17 SENZA CC", 
+                    "ARTRODESI VERTEBR. ESCL. QUELLA CERVICALE SENZA CC", 
+                    "T.M. APP. DIGERENTE SENZA CC", 
+                    "INT. MAGGIORI SU SIST. CARDIOVASCOLARE SENZA CC", 
+                    "INT.ARTO INF.,OMERO ESCL.ANCA ETC.,ETA'>17 CON CC"), 
+       col = 1:5, cex = 0.8, pch = 19)
+
+plot(x = c(2013:2016), y = c(worst$degenzaMedia[1], worst$DegenzaMedia2014[1], worst$DegenzaMedia2015[1], 
+                             worst$DegenzaMedia2016[1]), type = "o", pch = 19, col = 1, 
+     xlab = "Anno", ylab = "Degenza media", xaxt="n",
+     main = "Cinque maggiori peggioramenti in termini di degenza media", 
+     ylim = c(min(worst[1:5, 7:10]), max(worst[1:5, 7:10])))
+axis(1, xaxp=c(2013, 2016, 3), las=1)
+lines(x = c(2013:2016), y = c(worst$degenzaMedia[2], worst$DegenzaMedia2014[2], worst$DegenzaMedia2015[2], 
+                              worst$DegenzaMedia2016[2]), type = "o", pch = 19, col = 2)
+lines(x = c(2013:2016), y = c(worst$degenzaMedia[3], worst$DegenzaMedia2014[3], worst$DegenzaMedia2015[3], 
+                              worst$DegenzaMedia2016[3]), type = "o", pch = 19, col = 3)
+lines(x = c(2013:2016), y = c(worst$degenzaMedia[4], worst$DegenzaMedia2014[4], worst$DegenzaMedia2015[4], 
+                              worst$DegenzaMedia2016[4]), type = "o", pch = 19, col = 4)
+lines(x = c(2013:2016), y = c(worst$degenzaMedia[5], worst$DegenzaMedia2014[5], worst$DegenzaMedia2015[5], 
+                              worst$DegenzaMedia2016[5]), type = "o", pch = 19, col = 5)
+legend(2013, 40, legend = c("CHEMIO ASSOC. DIA SEC. LEUCEMIA ACUTA O USO DI ALTE DOSI DI AGENTI CHEMIOT.", 
+                            "LEUCEMIA ACUTA SENZA INT. CHIR. MAGGIORI, ETA' >17", 
+                            "NEONATI GRAVEMENTE IMMATURI O SINDR.DISTRESS RESP.", 
+                            "ENDOCARDITE ACUTA E SUBACUTA", 
+                            "INTERVENTI SU RENE E URETERE, NON PER NEOPLASIA CON CC"), 
+       col = 1:5, cex = 0.7, pch = 19)
+```
