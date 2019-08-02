@@ -1,0 +1,142 @@
+STEPS TO CREATE SHARDING CLUSTER
+
+#creo config server come replica set:
+mongod --configsvr --replSet conf --dbpath \data\conf\r1 --port 27911 
+mongod --configsvr --replSet conf --dbpath \data\conf\r2 --port 27412 
+mongod --configsvr --replSet conf --dbpath \data\conf\r3 --port 27413 
+
+mongo --port 27911 #mi collego ad una porta del server
+
+#configurazione:
+>rs.initiate(
+  {
+    _id: "conf",
+    configsvr: true,
+    members: [
+      { _id : 0, host : "localhost:27911" },
+      { _id : 1, host : "localhost:27412" },
+      { _id : 2, host : "localhost:27413" }
+    ]
+  }
+)      
+
+#creo il primo shard come replica set:
+mongod --shardsvr --replSet shard1.1 --dbpath \data\shard1.1\r1 --port 27414 
+mongod --shardsvr --replSet shard1.1 --dbpath \data\shard1.1\r2 --port 27415 
+mongod --shardsvr --replSet shard1.1 --dbpath \data\shard1.1\r3 --port 27416
+ 
+mongo --port 27414
+
+#configurazione:
+>rs.initiate(
+  {
+    _id: "shard1.1",
+    members: [
+      { _id : 4, host : "localhost:27414" },
+      { _id : 5, host : "localhost:27415" },
+      { _id : 6, host : "localhost:27416" }
+    ]
+  }
+)
+
+#creo il secondo shard:
+mongod --shardsvr --replSet shard1.2 --dbpath \data\shard1.2\r1 --port 27417 
+mongod --shardsvr --replSet shard1.2 --dbpath \data\shard1.2\r2 --port 27418 
+mongod --shardsvr --replSet shard1.2 --dbpath \data\shard1.2\r3 --port 27419 
+
+mongo --port 27417
+
+>rs.initiate(
+  {
+    _id: "shard1.2",
+    members: [
+      { _id : 7, host : "localhost:27417" },
+      { _id : 8, host : "localhost:27418" },
+      { _id : 9, host : "localhost:27419" }
+    ]
+  }
+)
+
+#collego il router mongos:
+mongos --configdb conf/localhost:27911,localhost:27412,localhost:27413 --port 27017
+mongo --port 27017  #client che si connette al router
+>sh.addShard( "shard1.1/localhost:27414")   #aggiungo gli shard prima specificati al cluster
+>sh.addShard( "shard1.1/localhost:27415")
+>sh.addShard( "shard1.1/localhost:27416")
+>sh.status()   #sharding status
+
+>sh.addShard( "shard1.2/localhost:27417")
+>sh.addShard( "shard1.2/localhost:27418")
+>sh.addShard( "shard1.2/localhost:27419")
+
+#mongoimport del dataset contenente le recensioni di booking collegandomi alla porta del mongos:
+mongoimport --host localhost:27017 --db england --collection hotel --file "C:\Users\Luca\progetto DM\Full\HotelEnglandFull.json" --jsonArray  #6262 documenti
+
+mongo --port 27017  
+>sh.enableSharding("england")  #shardo db importato
+>use england
+>db.hotel.createIndex( { _id: "hashed" } ) or db.hotel.ensureIndex( { _id: "hashed" } ) #creo un opportuno indice per l'hashed sharding
+>db.collection.getIndexes()  --> ottengo indici della collection
+>sh.shardCollection("hotel",{"_id":"hashed"}) #abilito l'hashed sharding sulla collezione importata
+
+#check: vedo come sono distribuiti i chunks negli shard
+>use england
+>db.hotel.getShardDistribution()
+
+#conto il numero di recensioni per ogni hotel e crea una nuova collection:
+>db.hotel.aggregate([{$project: {ID: 1, numberReviews:{$size:"$Reviews"}}}, { $out: "review_count" }])
+
+#cerco se sono presenti hotel con 0 recensioni dalla collection creata prima:
+db.review_count.aggregate([ {$match: {numberReviews:0}} ])
+
+#controllo che non ci siano hotel ripetuti confrontando il numero di documenti con il numero di campi 'ID' univoci:
+>db.hotel.count() #6262
+>db.hotel.distinct('ID').length #6262
+
+#creo una nuova collection con score medio e stdev. dei voti di ogni hotel:
+>db.hotel.aggregate([{$project:{_id:0, ID:1, MeanScore:{$avg:"$Reviews.Score"}, StdScore:{$stdDevPop:"$Reviews.Score"}}}, { $out: "HotelMean" }])
+
+#importo la collection riassuntiva dei prezzi di booking per ogni hotel (contiene count, media, stdev e quantili):
+mongoimport --db england --collection hotelprice_summary --file "C:\Users\hp\Google Drive\Università\Data Management\Progetto DM\Dataset Hotel\PriceJSONBooking.json" --jsonArray
+
+#importo la collection completa dei prezzi di booking per ogni hotel:
+mongoimport --db england --collection hotelprice_full --file "C:\Users\hp\Google Drive\Università\Data Management\Progetto DM\Dataset Hotel\PriceJSONBookingFull.json" --jsonArray
+
+#rinomino il campo "ID" in hotel_id per poter fare dopo il join:
+>db.hotelprice_summary.updateMany( {}, { $rename: { "ID": "hotel_id" } } )
+>db.hotelprice_full.updateMany( {}, { $rename: { "ID": "hotel_id" } } )
+
+#aggiungo la collection "hotelprice_summary" al campo "SummaryPrice" nella collection "hotel" creando una nuova collection "hotelprice" (necessario creare nuova collection):
+>db.hotel.aggregate([ { $lookup: { from: "hotelprice_summary", localField: "ID", foreignField: "hotel_id", as: "SummaryPrice" } }, { $out: "hotelprice" } ])
+
+#aggiungo la collection "hotelprice_full" al campo "FullPrice" nella collection "hotelprice" creando una nuova collection "hotelfinal" (necessario creare nuova collection):
+>db.hotelprice.aggregate([ { $lookup: { from: "hotelprice_full", localField: "ID", foreignField: "hotel_id", as: "FullPrice" } }, { $out: "hotelfinal" } ])
+
+#esporto il JSON completo di Booking con recensioni e prezzi:
+mongoexport --db england --collection hotelfinal --out "C:\Users\hp\Documents\Scraping\Dataset Hotel\HotelFinal.json"
+
+#cerco tutti i documenti con l'attributo count>0 (tutti i documenti con i prezzi):
+>db.hotelfinal.find({"SummaryPrice.count":{$gt:0}}, {SummaryPrice:1, FullPrice:1, ID:1, _id:0})
+
+#estraggo tutti gli hotel con i prezzi e inseriscimeli in una nuova collection "hotelfinal_filter":
+>db.hotelfinal.aggregate([ { $match: {"SummaryPrice.count":{$gt:0}} }, { $out: "hotelfinal_filter" }])
+
+#esporto il JSON contenente gli hotel avente i prezzi "hotelfinal_filter":
+mongoexport --db england --collection hotelfinal_filter --out "C:\Users\hp\Documents\Scraping\Dataset Hotel\HotelFinalFilter.json"
+
+#abilito l'hashed sharding sulle collection "hotelprice","hotelfinal" e "hotelfinal_filter" come fatto con la collection "hotel":
+>db.hotelfinal.createIndex( { _id: "hashed" } )
+>sh.shardCollection("england.hotelfinal",{"_id":"hashed"})
+>db.hotelprice.createIndex( { _id: "hashed" } )
+>sh.shardCollection("england.hotelprice",{"_id":"hashed"})
+>db.hotelfinal_filter.createIndex( { _id: "hashed" } )
+>sh.shardCollection("hotelfinal_filter",{"_id":"hashed"})
+
+#esporto tutto il DB:
+mongodump --db england --out "C:\Users\Luca\progetto DM\dd" --port 27017
+
+#converto tutto in json
+>bsondump --outFile hotelfinal.json england.hotelfinal.bson
+>bsondump --outFile hotelprice.json hotelprice.bson
+>bsondump --outFile hotelfinal_filter.json hotelfinal_filter.bson
+

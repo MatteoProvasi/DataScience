@@ -1,0 +1,95 @@
+﻿Far partire server MongoDB
+
+mongod --dbpath "C:\Users\hp\Documents\MongoDB"
+
+
+
+Importare JSON Recensioni Booking
+
+mongoimport --db england --collection hotel --file "C:\Users\hp\Documents\Scraping\Dataset Hotel\HotelFull.json" --jsonArray
+
+
+
+Per usare il database
+
+use england
+
+
+
+Conta il numero di recensioni per ogni hotel grazie alla funzione size e crea una nuova collection "review_count"
+
+db.hotel.aggregate([{$project: {ID: 1, numberReviews:{$size:"$Reviews"}}}, { $out: "review_count" }]) 
+
+
+
+Controlla nella collection review_count se esistono hotel con 0 recensioni e quindi errati
+
+db.review_count.aggregate([ {$match: {numberReviews:0}} ])
+
+
+
+Controllo che non ci siano hotel ripetuti confrontando il numero di documenti con il numero di campi 'ID' univoci
+
+db.hotel.count() #6262
+db.hotel.distinct('ID').length #6262
+
+
+
+Creare una nuova collection HotelMean con media e standard deviation dei voti di ogni hotel
+
+db.hotel.aggregate([{$project:{_id:0, ID:1, MeanScore:{$avg:"$Reviews.Score"}, StdScore:{$stdDevPop:"$Reviews.Score"}}}, { $out: "HotelMean" }])
+
+
+
+Importo la collection riassuntiva dei prezzi di booking per ogni hotel (contiene count, media, stdev e quantili)
+
+mongoimport --db england --collection hotelprice_summary --file "C:\Users\hp\Google Drive\Università\Data Management\Progetto DM\Dataset Hotel\PriceJSONBooking.json" --jsonArray
+
+
+
+Importo la collection completa dei prezzi di booking per ogni hotel
+
+mongoimport --db england --collection hotelprice_full --file "C:\Users\hp\Google Drive\Università\Data Management\Progetto DM\Dataset Hotel\PriceJSONBookingFull.json" --jsonArray
+
+
+
+Rinomina il campo "ID" in hotel_id per poter fare dopo il join
+
+db.hotelprice_summary.updateMany( {}, { $rename: { "ID": "hotel_id" } } )
+db.hotelprice_full.updateMany( {}, { $rename: { "ID": "hotel_id" } } )
+
+
+
+Aggiungo la collection "hotelprice_summary" al campo "SummaryPrice" nella collection "hotel" creando una nuova collection "hotelprice" (necessario creare nuova collection)
+
+db.hotel.aggregate([ { $lookup: { from: "hotelprice_summary", localField: "ID", foreignField: "hotel_id", as: "SummaryPrice" } }, { $out: "hotelprice" } ])
+
+
+
+Aggiungo la collection "hotelprice_full" al campo "FullPrice" nella collection "hotelprice" creando una nuova collection "hotelfinal" (necessario creare nuova collection)
+
+db.hotelprice.aggregate([ { $lookup: { from: "hotelprice_full", localField: "ID", foreignField: "hotel_id", as: "FullPrice" } }, { $out: "hotelfinal" } ])
+
+
+
+Esporto il JSON completo di Booking con recensioni e prezzi
+
+mongoexport --db england --collection hotelfinal --out "C:\Users\hp\Documents\Scraping\Dataset Hotel\HotelFinal.json"
+
+
+
+Trovami tutti i documenti con l'attributo count>0 (tutti i documenti con i prezzi)
+
+db.hotelfinal.find({"SummaryPrice.count":{$gt:0}}, {SummaryPrice:1, FullPrice:1, ID:1, _id:0})
+
+
+
+Estrai tutti gli hotel con i prezzi e inseriscimeli in una nuova collection "hotelfinal_filter"
+
+db.hotelfinal.aggregate([ { $match: {"SummaryPrice.count":{$gt:0}} }, { $out: "hotelfinal_filter" }])
+
+
+
+Esporto il JSON contenente gli hotel avente i prezzi "hotelfinal_filter"
+
+mongoexport --db england --collection hotelfinal_filter --out "C:\Users\hp\Documents\Scraping\Dataset Hotel\HotelFinalFilter.json"
