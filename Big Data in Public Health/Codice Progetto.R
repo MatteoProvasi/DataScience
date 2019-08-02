@@ -1,0 +1,339 @@
+library(dplyr)
+library(foreign)
+library(sqldf)
+library(stringr)
+library(ggplot2)
+library(colorRamps)
+# Mantenere il doppio backslash finale
+dir = "C:path\\"
+setwd(substr(dir, 1, nchar(dir)-1))
+
+
+# wd senza il doppio backslash finale
+setwd(substr(dir, 1, nchar(dir)-1))
+
+# File read
+filenames = list.files(path=dir, pattern="*.csv", full.names=TRUE) # lista dei file
+ldf = lapply(filenames, read.csv) # read
+res = lapply(ldf, summary) # creazione di una lista
+names(res) = substr(filenames, nchar(dir)+1, nchar(filenames)-4) #nomi
+
+# Creazione di dataframe partendo dai nomi precedentemente ottenuti 
+for (i in 1:length(ldf)){
+  assign(names(res)[i], as.data.frame(ldf[i]))
+}
+
+# Se il paese ha la stratificazione per regione, quest'ultimo è contenuto nella colonna del nome
+# Si lavorerà in base al nome del paese, quindi si divide il tutto in due colonne
+new_col = str_split_fixed(Europe$NAME, "_", 2)
+Europe = cbind(Europe, new_col) # aggiungo le nuove colonne
+Europe = subset(Europe, select = -NAME) # tolgo la originale
+colnames(Europe)[6:7] = c("Country", "Region") # rinomino
+
+
+### Filtraggio
+# Unione casi - popolazione per Cancer_ID=11 (tumore al polmone)
+full = sqldf("SELECT *
+             FROM Europe_Cases AS ec, Europe_Pops AS ep
+             WHERE ec.REGISTRY=ep.REGISTRY AND ec.SEX=ep.SEX AND ec.YEAR=ep.YEAR
+             AND Cancer=11")
+
+# Si eliminano le colonne duplicate
+full = full[, c(1:ncol(Europe_Cases), (ncol(Europe_Cases)+4):ncol(full))]
+
+# Rinominazione
+# Un nome con "+" al suo interno non è considerato valido dalla funzione sqldf
+colnames(full)[ncol(Europe_Cases)-1] = "N85" 
+colnames(full)[ncol(Europe_Cases)+1] = "PopTotal" 
+colnames(full)[ncol(full)] = "P85" 
+
+# Merge con Europe per il nome del paese
+full = merge(full, Europe, by.x="REGISTRY", by.y="REGISTRY")
+
+
+# Somma per Paese/Anno del numero di casi e della popolazione per fasce d'età
+# Non si considerano gli N_UNK
+full = sqldf("SELECT Country, Year, 
+             SUM(Total)-SUM(N_UNK) AS Total, SUM(N0_4) AS N0_4, SUM(N5_9) AS N5_9,
+             SUM(N10_14) AS N10_14, SUM(N15_19) AS N15_19, SUM(N20_24) AS N20_24,
+             SUM(N25_29) AS N25_29, SUM(N30_34) AS N30_34, SUM(N35_39) AS N35_39,
+             SUM(N40_44) AS N40_44, SUM(N45_49) AS N45_49, SUM(N50_54) AS N50_54,
+             SUM(N55_59) AS N55_59, SUM(N60_64) AS N60_64, SUM(N65_69) AS N65_69,
+             SUM(N70_74) AS N70_74, SUM(N75_79) AS N75_79, SUM(N80_84) AS N80_84,
+             SUM(N85) AS N85, SUM(N_UNK),
+             SUM(PopTotal) AS PopTotal, SUM(P0_4) AS P0_4, SUM(P5_9) AS P5_9,
+             SUM(P10_14) AS P10_14, SUM(P15_19) AS P15_19, SUM(P20_24) AS P20_24,
+             SUM(P25_29) AS P25_29, SUM(P30_34) AS P30_34, SUM(P35_39) AS P35_39,
+             SUM(P40_44) AS P40_44, SUM(P45_49) AS P45_49, SUM(P50_54) AS P50_54,
+             SUM(P55_59) AS P55_59, SUM(P60_64) AS P60_64, SUM(P65_69) AS P65_69,
+             SUM(P70_74) AS P70_74, SUM(P75_79) AS P75_79, SUM(P80_84) AS P80_84,
+             SUM(P85) AS P85 
+             FROM full
+             WHERE Country!='Slovenia'
+             GROUP BY Country, Year")
+
+# Age stratified crude rates
+RI = full[, c(1:3, 23)]
+RI = cbind(RI, round((100000*full[, 4:21])/full[, 24:41], 3)) # calcolo
+
+# Rinomino le colonne
+names(RI)[3:ncol(RI)] = c("Cases", "Pop", "0-4", "5-9", "10-14", "15-19", "20-24", "25-29", "30-34", "35-39",
+                          "40-44", "45-49", "50-54", "55-59", "60-64", "65-69", "70-74", 
+                          "75-79", "80-84", "85")
+
+RI = cbind(RI, full[, 24:41]) # Aggiungo i valori di popolazione per fascia d'età
+ratio_pop = (RI[, 23:40])/RI[, 4] # Proporzione di popolazione per fascia d'età
+
+# Calcolo del crude rate 
+# Rate moltiplicati per la proporzione di popolazione
+crude = cbind(RI[, 1:4], round((RI[, 5:22]*ratio_pop[, 1:18]), 3))
+crude = cbind(crude, rowSums(crude[1:nrow(crude), 5:22]))
+names(crude)[23] = "Crude"
+
+
+### Standardizzazione
+# Popolazione standard
+df = as.data.frame(rbind(as.integer(std_world_pop18classes[, 2])))
+
+# Trasformato in un vettore per semplicità
+vect = c()
+for (i in 1:length(df)){
+  vect[i] = df[[i]]
+}
+
+# Calcolo ASR
+# Divisione del crude rate per 100'000
+temp_standard = RI
+temp_standard = cbind(temp_standard[, 1:4], temp_standard[, 5:22]/100000)
+
+# Somma dei valori di riga (singole fasce d'età) per ottenere l'ASR per ogni riga
+ASR_vect =  c()
+for (i in 1:nrow(temp_standard)){
+  ASR_vect[i] = sum(temp_standard[i, 5:22]*vect)
+}
+temp_standard = cbind(temp_standard, ASR_vect) # valori standardizzati
+
+
+dev.new() # da mettere a tutto schermo
+
+# Plot iniziale della Austria
+aut_m = crude[which(crude$Country=="Austria"), ]
+plot(aut_m$YEAR, aut_m$Crude, type="l", 
+     ylim=c(min(crude$Crude), max(crude$Crude)),
+     xlim=c(min(crude$YEAR), max(crude$YEAR)),
+     xlab="Year", ylab="Risk", main="Non-standardized rate (per 100'000)")
+
+c_list = unique(full$Country)
+for (country in c_list){
+  temp = crude[which(crude$Country==country), ]
+  lines(temp$YEAR, temp$Crude, col=match(country, c_list))
+}
+legend("topleft", legend=c_list,
+       col=1:length(c_list), lty=1, cex=0.7)
+
+
+# Visualizzazione dei 3 paesi migliori e peggiori per HDI (2012)
+# In aggiunta anche Germania, Francia, Italia, Spagna, Regno Ubito
+c2_list = c("Norway", "Switzerland", "Ireland", "Germany", "France", "Italy",
+            "Spain", "UK", "Croatia", "Bulgaria", "Belarus")
+
+dev.new()
+colors = colorRamps::primary.colors(length(c2_list))
+colors[4] = "blue"
+colors[8] = "gold"
+colors[10] = "red"
+
+nor_m = crude[which(crude$Country=="Norway"), ]
+plot(nor_m$YEAR, nor_m$Crude, type="l", 
+     ylim=c(min(crude$Crude), max(crude$Crude)),
+     xlim=c(min(crude$YEAR), max(crude$YEAR)),
+     xlab="Year", ylab="Risk", main="Non-standardized rate (per 100'000)",
+     lwd=1.8)
+
+for (country in c2_list){
+  temp = crude[which(crude$Country==country), ]
+  lines(temp$YEAR, temp$Crude, 
+        col=colors[match(country, c2_list)],
+        lwd=1.8)
+}
+legend("topleft", legend=c2_list,
+       col=colors, lty=1, lwd=1.8, cex=1.1)
+
+
+
+### Plot con i valori standardizzati
+dev.new()
+nor_m_std = temp_standard[which(temp_standard$Country=="Norway"), ]
+plot(nor_m_std$YEAR, nor_m_std$ASR_vect, type="l", 
+     ylim=c(min(temp_standard$ASR_vect), max(temp_standard$ASR_vect)),
+     xlab="Year", ylab="Risk", main="Standardized rate (per 100'000)",
+     lwd=1.8)
+
+for (country in c2_list){
+  temp = temp_standard[which(temp_standard$Country==country), ]
+  lines(temp$YEAR, temp$ASR_vect, col=colors[match(country, c2_list)],
+        lwd=1.8)
+}
+legend("topleft", legend=c2_list,
+       col=colors, lty=1, lwd=1.8, cex=1.1)
+
+# zoom
+dev.new()
+nor_m_std = temp_standard[which(temp_standard$Country=="Norway"), ]
+plot(nor_m_std$YEAR, nor_m_std$ASR_vect, type="l", 
+     ylim=c(15, 40), xlim=c(2000, 2012),
+     xlab="Year", ylab="Risk", main="Standardized risk (per 100'000)",
+     lwd=1.8)
+
+for (country in c2_list){
+  temp = temp_standard[which(temp_standard$Country==country), ]
+  lines(temp$YEAR, temp$ASR_vect, col=colors[match(country, c2_list)],
+        lwd=1.8)
+}
+legend("bottomleft", legend=c2_list,
+       col=colors, lty=1, lwd=1.8, cex=0.7)
+
+
+
+
+# Creazione del dataset con i range di età per riga e la popolazione standard
+df = matrix(, nrow=0, ncol=5)
+
+colnames(df) = c("age_group", "country", "year", "cases", "pop")
+for (j in 24:41){
+  for (i in 1:nrow(full)){
+    vect = c()
+    vect[1] = colnames(full[j])
+    vect[2] = as.character(full[i, 1])
+    vect[3] = full[i, 2]
+    vect[4] = full[i, j-20]
+    vect[5] = full[i, j]
+    df = rbind(df, vect)
+  } 
+}
+
+df = as.data.frame(df)
+df$pop = as.integer(as.character(df$pop))
+df$age_group = gsub('P', '', df$age_group)
+std_world_pop18classes$Age.group = gsub('-', '_', std_world_pop18classes$Age.group)
+std_world_pop18classes$Age.group = gsub('+', '', std_world_pop18classes$Age.group, fixed = TRUE)
+colnames(std_world_pop18classes) = c("group_age", "std_pop")
+
+df = sqldf("SELECT age_group, country, year, cases, pop, std_pop
+            FROM df, std_world_pop18classes
+            WHERE age_group=group_age")
+
+df$cases = as.integer(as.character(df$cases))
+# Numero di tumori diviso le persone anno
+df$cancer_expected = (df$cases / df$pop) * df$std_pop
+
+
+#---- SIR paesi di riferimenti ----
+sir_tot = c()
+asr_tot = matrix(, nrow=1, ncol=0)
+asr_tot = as.data.frame(asr_tot)
+for (country in c2_list){
+  temp_df_country = assign(paste0("df_", country), df[which(df$country == country), ])
+  temp_asr_country = aggregate(data.frame(cancer_expected=temp_df_country$cancer_expected,
+                                          pop_world=temp_df_country$std_pop),
+                               by=list(year=temp_df_country$year), 
+                               FUN=sum)
+  temp_asr_country$asr = temp_asr_country$cancer_expected / temp_asr_country$pop_world
+  temp_asr_country2 = assign(paste0("asr_", country), temp_asr_country)
+  temp_sir_country = assign(paste0("sir_", country), 
+                            temp_asr_country2$asr[temp_asr_country2$year == 2012] /
+                              temp_asr_country2$asr[temp_asr_country2$year == 1998])
+  
+  print(paste(country, "SIR:", 
+              temp_asr_country2$asr[temp_asr_country2$year == 2012] /
+                temp_asr_country2$asr[temp_asr_country2$year == 1998]))
+  
+  sir_tot = append(sir_tot, temp_sir_country)
+  temp = temp_asr_country[which(temp_asr_country$year==2012), ]
+  asr_tot = cbind(asr_tot, temp[1, ncol(temp)])
+}
+
+# Rinomino il df con gli ASR del 2010
+names(asr_tot) = c2_list
+asr_tot = as.data.frame(t(asr_tot))
+asr_tot = cbind(asr_tot, c2_list)
+names(asr_tot) = c("ASR", "Country")
+asr_tot = asr_tot[c(2,1)]
+
+
+# Bar Plot 
+tabb = data.frame(c2_list, sir_tot)
+
+ggplot(tabb, aes(x=c2_list, y=sir_tot)) +
+  geom_bar(stat="identity", width=0.5, color="black", fill=colors) + 
+  geom_text(aes(label=round(sir_tot, 3)), vjust=-0.3, color="black", size=5.5) + 
+  labs(x = "Country", y = "Standardised Incidence Ratio") + 
+  theme_classic() +
+  scale_x_discrete(limits=c2_list)
+
+names(tabb) = c("Country", "SIR")
+
+
+# Poisson
+# Contrasti 2012 e 1998
+for (country in c("Norway", "Italy", "Belarus")){
+  temp_df = df[which(df$country==country), ]
+  temp_df$year2012 = NA
+  temp_df$year2012[temp_df$year==2012] = 1
+  temp_df$year2012[temp_df$year==1998] = 0 
+  temp_df$age_group = as.factor(temp_df$age_group)
+  temp_df = within(temp_df, age_group <- relevel(age_group, ref = "70_74"))
+  
+  model = glm(cases ~ year2012, offset=log(pop), 
+              data=temp_df[!is.na(temp_df), ], family="poisson")
+  print(paste("------- Poisson summary for", country, "-------"))
+  print(summary(model))
+  
+  print(exp(cbind("Incidence rate ratio" = coef(model), 
+                  confint.default(model, level=0.95))))
+}
+
+# Contrasti fra classi d'età
+for (country in c("Norway", "Italy", "Belarus")){
+  temp_df = df[which(df$country==country), ]
+  temp_df$year2012 = NA
+  temp_df$year2012[temp_df$year==2012] = 1
+  temp_df$year2012[temp_df$year==1998] = 0 
+  temp_df$age_group = as.factor(temp_df$age_group)
+  temp_df = within(temp_df, age_group <- relevel(age_group, ref = "70_74"))
+  
+  model = glm(cases ~ age_group, data=temp_df[temp_df$year==2012, ], family="poisson")
+  
+  print(paste("------- Poisson summary for", country, "-------"))
+  print(summary(model))
+}
+
+
+
+# Contrasti fra tutti gli anni e classi d'età
+for (country in c("Italy", "Belarus", "Norway")){
+  temp_df = df[which(df$country==country), ]
+  temp_df$age_group = as.factor(temp_df$age_group)
+  temp_df = within(temp_df, age_group <- relevel(age_group, ref = "70_74"))
+  
+  model = glm(cases ~ as.factor(year) + age_group, data=temp_df, 
+              family="poisson", offset=log(pop))
+  
+  print(paste("------- Poisson summary for", country, "-------"))
+  print(summary(model))
+  print(exp(cbind("Incidence rate ratio" = coef(model), 
+                  confint.default(model, level=0.95))))
+}
+
+
+
+# IRR nei diversi anni per la Norvegia (1953 anno di riferimento)
+model_estimates = model$coefficients[c(2:60)]
+year = seq(1954, 2012)
+model_estimates = as.data.frame(model_estimates)
+model_estimates = cbind(model_estimates, year)
+plot(model_estimates$year, exp(model_estimates$model_estimates),
+     ylab="Coefficients", xlab="Year", type="l", lwd=2,
+     main="IRR change among the years (Norway)")
+abline(v=1998, col=2)
+abline(v=2012, col=4)
