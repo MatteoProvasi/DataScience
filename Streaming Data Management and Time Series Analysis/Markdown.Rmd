@@ -1,0 +1,485 @@
+---
+title: "Time Series"
+author: "Matteo Provasi"
+date: "10/9/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(encoding = 'UTF-8')
+```
+
+```{r packages, message=FALSE, warning=FALSE}
+library(dplyr)     # handling datasets
+library(dygraphs)  # graphs
+library(forecast)  # predictions 
+library(ggplot2)   # plots
+require(gridExtra) # subplots
+library(KFAS)      # UCM
+library(lubridate) # date
+library(MLmetrics) # stats
+library(tseries)   # time series and tests
+library(tsfknn)    # machine learning
+library(xts)       # time series
+```
+
+# 1. Introduzione
+
+La serie storica comprende osservazioni da gennaio ad aprile 2016 di una località del Belgio. Gli intervalli temporali fra ogni osservazione sono di $10$ minuti. Durante l'ultima settimana di marzo il Belgio è uno dei paesi che effettua il passaggio all'ora legale. Se le osservazioni nel dataset fossero codifiate secondo l'orario CET (e CEST nei medi da marzo ad ottobre), si dovrebbe verificare un gap di un'ora nella notte fra sabato 26 marzo 2016 e domenica 27 marzo 2016. <br>
+Il dataset presenta invece continuità e nella descrizione dei dati non è presente nessun riferimento ad un eventuale cambio d'orario. La seconda parte del dataset prende informazioni metereologiche provenienti da un altro sito in cui il cambio d'ora viene effettuato. Non si può avere la certezza se sia stata effettuata una traslazione dell'orario per eliminare l'effetto dell'ora legale, non avendo ulteriori informazioni i dati saranno trattati come se non ci fosse alcuna anomalia. <br>
+R in alcune situazioni può fare riferimento all'orario di sistema per lavorare con le date, per evitare che ci sia uno slittamento in avanti si imposta l'orario su UTC, l'orario universale che non prevede il cambio d'ora.
+```{r}
+Sys.setenv(TZ = 'GMT')
+dir = "C:\\Users\\prowm\\OneDrive\\Desktop\\Data Science\\Serie Storiche\\Progetto\\energydata_complete.csv"
+energy = read.csv(file = dir, sep = ",", header = TRUE)
+```
+<br>
+
+## 1.2 Preparazione del dataset
+
+Solo le prime due variabili saranno utilizzate per le analisi. La variabile data è in formato character, viene quindi resa una data.
+```{r}
+energy = energy[, c(1:2)]
+str(energy)
+
+energy$date = as.POSIXct(energy$date, format = "%Y-%m-%d %H:%M:%S")
+```
+<br>
+
+La richiesta del progetto richiede che i dati siano raggruppati per ora, quindi il consumo di energia sarà risultante dalla somma delle sei rilevazioni orarie. Prima di procedere al raggruppamento si controlla se ci siano sei osservazioni per ogni ora.
+```{r}
+print(nrow(energy)/6)
+```
+<br>
+
+Il numero di righe non è divisibile per sei, significa che quindi una o più ore hanno un numero di rilevazioni diverso da sei. La seguente funzione effettua una differenza di data fra un'osservazione e quella successiva. Il risultato espresso in minuti viene convertito in numero; se la differenza è conforme dovrebbe restituire un risultato di $-10$.
+Il loop non identifica nessuna anomalia, significa che l'unica osservazione non conforme e quindi viene rimossa.
+```{r}
+for (i in 1:(nrow(energy)-1)){
+  diff = as.numeric(energy$date[i] - energy$date[i+1])
+  if (diff == -10) {}
+  else {
+    print(i)
+  }
+}
+
+energy = energy[-nrow(energy), ]
+```
+
+```{r}
+head(energy); tail(energy)
+```
+
+Con la funzione `floor_date` si crea una nuova variabile che contiene solo l'informazione dell'ora (i minuti e secondi sono messi a <b>00</b>). Questa variabile viene utilizzata per il raggruppamento mediante il pacchetto `dplyr`.
+```{r}
+energy$time = floor_date(energy$date, "60 mins")
+energy = energy %>% 
+  group_by(time) %>% 
+  summarize(Appliances = sum(Appliances))
+```
+<br>
+
+Rappresentazione della serie storica.
+```{r}
+energy_ts = xts(energy$Appliances, order.by = as.POSIXct(energy$time, format = "%Y-%m-%d %H:%M:%S"))
+names(energy_ts) = "Appliances"
+dygraph(energy_ts, main = "Hourly energy used (in Wh)") %>%
+  dyRangeSelector()
+```
+<br>
+Difficile dire ad occhio se la serie sia stazionaria o meno. Si plottano le medie e le deviazioni standard orarie. Nel caso ci sia un aumento della deviazione standard al crescere delle medie si è in una condizione tale per cui non è garantita la stazionarietà in varianza, necessaria per l'analisi della serie storica.
+
+```{r}
+medie = tapply(energy_ts, as.Date(index(energy_ts)), mean)
+stdev = tapply(energy_ts, as.Date(index(energy_ts)), sd)
+plot(medie, stdev)
+```
+<br>
+
+Dal plot risulta evidente che non ci sia stazionarietà in varianza e l'andamento lineare suggerisce che una trasformazione logaritmo possa essere utile per ottenere stazionarietà. Prima di procedere con la trasformazione si controlla se il valore minimo non è nullo per evitare la produzione di valori non finiti. 
+```{r}
+print(min(energy_ts$Appliances))
+energy_log = log(energy_ts$Appliances)
+
+dygraph(energy_log, main = "Hourly log(energy) used (in Wh)") %>%
+  dyRangeSelector()
+```
+
+La serie sembra essere stazionaria sia in varianza che in media, ma per essere più sicuri si può effettuare un test statistico per averne la certezza. Il test scelto è il <b>KPSS</b> (dal nome degli autori) implementato dal pacchetto `tseries`. <br>
+Dalla versione $0.10.45$ alla $0.10.47$ cambia il parametro di default di `lshort` che è il lag considerato per effettuare il test, a seconda del valore utilizzato possono esserci delle conclusioni diverse sull'ipotesi nulla. In questo caso viene utilizzato il parametro `TRUE` che applica il lag suggerito dagli autori stessi del test nel loro paper. <br>
+Il test può essere effettuato sia per la stazionarietà in varianza che in media, e l'ipotesi nulla di riferimento è che ci sia stazionarietà.
+```{r}
+packageVersion("tseries")
+kpss.test(energy_log, null = "Level", lshort = TRUE); kpss.test(energy_log, null = "Trend", lshort = TRUE)
+```
+
+Per entrambi i test il $p-value$ è maggiore di $0.1$ da cui si accetta l'ipotesi nulla e quindi è confermata la condizione di stazionarietà. <br>
+Come richiesto il dataset viene diviso in train e test. Da notare che senza il passaggio all'orario UTC il valore di `cutoff_id` risulterebbe minore di due unità in quanto R di default trasformerebbe l'orario da 17:00:00 UTC a 19:00:00 CEST
+```{r}
+dim(energy_log)[1] == nrow(energy)
+min(energy$time)
+cutoff_id = which(energy$time == "2016-04-11 17:00:00")
+l_train = ts(energy_log[1:(cutoff_id-1)], frequency = 24)
+l_test = ts(energy_log[cutoff_id:dim(energy_log)[1]], frequency = 24)
+```
+<br><br>
+
+
+# 2. Modelli ARIMA
+
+Per l'implementazione dei modelli ARIMA e capire quale sia il processo che ha generato la serie storica si deve far riferimento alle autocorrelazioni e alle autocorrelazioni parziali. Le funzioni presentano il nome in maiuscolo poiché non sono quelle di dafault ma prese dal pacchetto `forecast`. La seguente funzione vista a lezione permette di visualizzare entrambi i plot in un'unica finestra.
+```{r}
+acfpacf = function(x, max.lag, na.action = na.pass, main.acf = ''){
+  par(mfrow = c(2,1))
+  Acf(x, max.lag, main = main.acf)
+  Pacf(x, max.lag, main = '')
+  par(mfrow = c(1,1))
+}
+```
+
+
+```{r}
+acfpacf(l_train, max.lag = 96)
+```
+<br>
+Dall'analisi dei grafici si nota un andamento descrescente con velocità geometrica nell'ACF mentre le autocorrelazioni del PACF, le prime tre, escono dalle bande di confidenza (il primo è la correlazione su se stesso quindi è $1$ per definizione e non viene considerato). L'andamento dell'ACF suggerisce che si tratti di un processo autoregressivo, il numero di autorcorrelazioni fuori dalle bande nel PACF indica l'ordine. Si prova ad implementare quindi un modello <b>AR(3)</b>. <br>
+
+```{r}
+mod1 = Arima(l_train, c(3,0,0), c(0,0,0))
+acfpacf(mod1$residuals, max.lag = 96, main.acf = "ARIMA (3,0,0)(0,0,0)")
+```
+<br>
+Si replicano i grafici per individuare nuove componenti. Si nota le autocorrelazioni escono dalle bande circa ogni $24$ ore sia nell'ACF che PACF. Si è quindi in presenza di una stagionalità. Il secondo modello prevederà in aggiunta una componente stagionale giornaliera. <br>
+
+```{r}
+mod2 = Arima(l_train, c(3,0,0), seasonal = list(order = c(0,1,0), period = 24))
+acfpacf(mod2$residuals, max.lag = 96, main.acf = "ARIMA (3,0,0)(0,1,0)")
+```
+<br>
+Nell'ACF si ha un'unica correlazione oltre le bande, nel PACF ce ne sono diverse, ogni $24$ ore, che calano con velocità geometrica. Si tratta quindi di una stagionalità, l'andamento del PACF suggerisce che sia media mobile e l'unico valore anomalo nell'ACF indica l'ordine. Il terzo modello ha in aggiunta la componente <b>SMA(1)</b>. <br>
+
+```{r}
+mod3 = Arima(l_train, c(3,0,0), seasonal = list(order = c(0,1,1), period = 24))
+acfpacf(mod3$residuals, max.lag = 96, main.acf = "ARIMA (3,0,0)(0,1,1)")
+```
+<br>
+Non risaltano delle particolarità all'interno dei grafici, i picchi nell'ACF si verificano ogni $24$ ore e sembrano diminuire progressivamente. Non è molto evidente ma potrebbe essere indice di una componente stagionale autoregressiva di ordine uno. Il quarto modello ha in aggiunta la componente <b>SAR(1)</b>. <br>
+
+```{r}
+mod4 = Arima(l_train, c(3,0,0), seasonal = list(order = c(1,1,1), period = 24))
+acfpacf(mod4$residuals, max.lag = 96, main.acf = "ARIMA (3,0,0)(1,1,1)")
+```
+<br>
+Si notano dei leggeri cambiamenti e non sembrano esserci ulteriori particolarità per poter inserire altri elementi. <br>
+Si procede quindi con un test dei residui per verificare che essi siano distribuiti come un white noise. La funzione `checkresiduals` restituisce tre grafici:
+
+* Il primo è un plot nel tempo dei residui
+* Il secondo è l'ACF già calcolato in precedeza
+* Il terzo è un'istogramma della distribuzione dei residui su cui è aggiunta la distribuzione di una normale.
+
+In aggiunta a queste informazioni viene computato il test di <b>Ljung-Box</b> che valuta la presenza di autocorrelazioni all'interno della serie storica. L'ipotesi nulla è che le correlazioni presenti nella serie storica non siano sistematiche ma casuali.
+
+```{r}
+checkresiduals(mod3,lag = 300, plot = TRUE)
+checkresiduals(mod4,lag = 300, plot = TRUE)
+```
+I grafici dei due modelli sono molti simili e non si intravedono differenze sostanzali. Per entrambi il test di <b>Ljung-Box</b> test ha esito positivo con $p-value$ abbondantemente maggiore di $0.05$. L'unica particolarità sembra essere relativa alla distribuzione leggermente asimmetrica visibile nell'ultimo plot, però il test conferma che non è tale da influire la condizione di white noise. <br> <br>
+
+
+## 2.2 Auto-ARIMA
+
+Come ulteriore sviluppo si può utilizzare la funzione `auto.arima` per effettuare una ricerca automatica del modello migliore basato sull'<b>AIC</b> (<i>Akaike Information Critera</i>). In breve questa statistica tiene in considerazione il fit del modello e la sua parsimonia, più basso è il valore, migliore è il modello. La funzione `auro.arima` prevede diversi parametri:
+
+* `D`: indica la presenza di una differenza stagionale, nel caso in esame viene posta ad $1$ in quanto sembra più che evidente la sua presenza.
+* `stepwise`: la selezione del modello migliore procede in entrambe le direzioni. Se nella costruzione di un modello, l'aggiunta di una componente non risulta essere d'aiuto l'algoritmo torna allo step precedente per trovare un'altra combinazione.
+* `stationary`: si richiede la ricerca di modelli stazionari.
+* `approximation`: essendo molto dispendioso a livello computazionale anche con una serie di breve durata, si effettua un'approssimazione per velocizzare il processo.
+
+```{r}
+ar = auto.arima(l_train, D = 1, stepwise = TRUE, stationary = TRUE, trace = TRUE, approximation = TRUE)  
+mod_ar = Arima(l_train, c(3,0,1), seasonal = list(order = c(2,0,0), period = 24))
+acfpacf(mod_ar$residuals, max.lag = 96, main.acf = "ARIMA (3,0,1)(2,0,0)")
+```
+<br>
+Il modello migliore risulta diverso da entrambi quelli considerati in precedenza. Il modello conferma la presenza di un processo <b>AR(3)</b> in più aggiunge una <b>MA(1)</b>. La stagionalità è molto differente con solamente un <b>SAR(2)</b>.
+
+```{r}
+checkresiduals(mod_ar,lag = 300, plot = TRUE)
+```
+<br>
+L'analisi dei residui suggerisce che non sono white noise, il $p-value$ del test è estramamente basso e l'ipotesi nulla deve essere rigettata. <br>
+
+
+Al fine di trovare quale sia il modello migliore si utilizza la funzione `capture.output` per estrarre le informazioni principali. Questi risultati sono messi in un dataframe che viene poi stampato a video.
+```{r}
+summary_mod3 = capture.output(mod3)[c(2,9,10)]
+summary_mod4 = capture.output(mod4)[c(2,9,10)]
+summary_mod_ar = capture.output(mod_ar)[c(2,9,10)]
+
+models = as.data.frame(rbind(summary_mod3, summary_mod4, summary_mod_ar))
+models
+```
+Come si era già verificato in precedenza il modello autoarima è il peggiore, mentre la differenza fra `mod3` e `mod4` risulta essere molto contenuta con l'<b>AIC</b> che favorisce quest'ultimo.
+<br>
+
+Prendendo come riferimento i dati di train vengono fatte le previsioni sul test con il modello migliore.
+```{r}
+forecast_arima = forecast(l_train, h = dim(l_test)[1], model = mod4)
+```
+<br>
+Dalla funzione forecast si estraggono i valori predetti che vengono trasformati in una serie storica per poter essere plottati insieme alla serie originale.
+```{r}
+plot_train = energy_log[1:(cutoff_id-1)]
+plot_test = energy_log[cutoff_id:nrow(energy_log)]
+names(plot_train) = "Train"
+names(plot_test) = "Test"
+forecast = xts(forecast_arima$mean, order.by = index(plot_test))
+```
+<br>
+Le seguenti righe di codice permettono di plottare il train-test e le previsioni.
+```{r}
+lines = cbind(plot_train, plot_test, forecast)
+dygraph(lines, main = "Hourly log(energy) used (in Wh) - ARIMA predictions") %>%
+  dySeries("Train", color = "green") %>%
+  dySeries("Test", color = "blue") %>%
+  dySeries("forecast", color = "red") %>%
+  dyRangeSelector()
+```
+<br>
+Visualizzazione ristretta solo al test.
+```{r}
+lines2 = cbind(plot_test, forecast)
+dygraph(lines2, main = "Hourly log(energy) used (in Wh) - ARIMA predictions (test)") %>%
+  dySeries("Test", color = "blue") %>%
+  dySeries("forecast", color = "red") %>%
+  dyRangeSelector()
+```
+Il modello generato ha un buon fit riesce a cogliere correttamente l'andamento della serie, tuttavia non riesce ad individuare i picchi, sia in negativo sia, specialmente, in positivo. <br><br>
+
+Per valutare in termini numerici il fit del modello possono essere utilizzate diverse metriche. La funzione accuracy riporta le principali di esse. Si sceglie di utilizzare il <b>MAE</b> (<i>Mean Absolute Error</i>), la media del valore assoluto degli errori di predizione, sia perché è intuitivo sia perché è facile la trasformazione inversa.
+```{r}
+accuracy(forecast_arima)
+MAE(forecast_arima$fitted, as.vector(l_train)); MAE(forecast_arima$mean, as.vector(l_test))
+MAE(exp(forecast_arima$fitted), as.vector(exp(l_train))); MAE(exp(forecast_arima$mean), as.vector(exp(l_test)))
+```
+L'errore commesso sul test è di $0.327$, trasformato in valori originarli $219.33$ Wh.<br><br><br>
+
+
+# 3. Modelli UCM
+
+La seconda famiglia di modelli creati è quella <b>UCM</b>. Il trend utilizzato è lineare, la serie sembra essere stazionaria intorno ad una media, quindi la varianza del livello viene posta nulla. In aggiunta per cogliere l'andamento giornaliero della serie viene aggiunta una componente stagionale dummy. <br>
+Vengono inizializzati i valori delle varianze che saranno poi passati alla funzione `updt`. Infine la funzione `fitSSM` creerà le stime di massima verosimiglianza dei parametri ignoti.
+```{r}
+mod_ucm1 = SSModel(l_train ~ 0 +
+                   SSMtrend(1, 0) +
+                   SSMseasonal(24, NA, sea.type = "dummy"),
+                   H = NA)
+
+init = c(logvar_eps = log(100), logvar_om = log(20))
+
+updt = function(pars, model) {
+  model$H[1, 1, 1] = exp(pars[1])
+  model$Q[2, 2, 1] = exp(pars[2])
+  model
+}
+
+fit = fitSSM(mod_ucm1, init, updt)
+```
+<br>
+Viene controllata la convergenza dell'algoritmo.
+```{r}
+fit$optim.out$convergence
+```
+<br>
+La funzione `KFS` applica il <b>filtro di Kalman</b> per trovare i valori delle componenti nel train e nel test. Il successivo grafico visualizza l'andamento delle prime quattro componenti dummy.
+```{r}
+smo1 = KFS(fit$model)
+
+par(mfrow = c(2,2))
+
+for (i in 1:4){
+  plot(smo1$alphahat[, paste0("sea_dummy", as.character(i))], type = "l", 
+       ylab = paste0("Componente dummy #", as.character(i)))
+}
+```
+<br>
+L'andamento è costante per tutte le componenti, la loro natura è deterministica. <br>
+
+Come per la serie precedente i valori predetti sono estratti, trasformati in serie storica e visualizzati insieme alla serie originale.
+```{r}
+par(mfrow = c(1,1))
+pred_ucm = predict(fit$model, n.ahead = dim(l_test)[1])
+forecast_ucm = xts(pred_ucm, order.by = index(plot_test))
+
+lines3 = cbind(plot_train, plot_test, forecast_ucm)
+dygraph(lines3, main = "Hourly log(energy) used (in Wh) - UCM predictions (daily seasonal)") %>%
+  dySeries("Train", color = "green") %>%
+  dySeries("Test", color = "blue") %>%
+  dySeries("fit", color = "red") %>%
+  dyRangeSelector()
+```
+Come era prevedibile dalle dummy a natura deterministica, anche l'andamento della serie risulta tale. Si ha ancora una volta il problema dei picchi che non vengono correttamente identificati. <br><br>
+Si può plottare nuovamente la serie originale per cercare di trovare alcuni pattern.
+```{r}
+dygraph(energy_log, main = "Hourly log(energy) used (in Wh)") %>%
+  dySeries(label = "log(energy)", color = "black") %>%
+  dyShading(from = "2016-1-24", to = "2016-1-25", color = "#FFE6E6") %>%
+  dyShading(from = "2016-1-30", to = "2016-1-31", color = "#FFE6E6") %>%
+  dyRangeSelector()
+```
+Nelle bande evidenziate ci sono i due picchi maggiori in assoluto e la particolarità è che si trovano a distanza di una settimana dall'altra. Questo suggerisce che un'ulteriore componente stagionale, questa volta a frequenza settimana possa essere utile a cogliere questi picchi. <br>
+
+Il secondo modello <b>UCM</b> implementato è lo stesso del punto precedente con l'aggiunta della componente stationale settimanale, questa volta con delle sinusoidi.
+```{r}
+mod_ucm2 = SSModel(l_train ~ 0 +
+                   SSMtrend(1, 0) +
+                   SSMseasonal(24, NA, sea.type = "dummy") +
+                   SSMseasonal(168, NA, sea.type = "trig", harmonics = 1:16),
+                   H = NA)
+
+init2 = c(logvar_eps = log(100), logvar_om = log(20), logvar_om2 = log(10))
+
+updt2 = function(pars, model) {
+  dq = dim(model$Q)[1]
+  model$H[1, 1, 1] = exp(pars[1]) #disturbo dummies
+  model$Q[2, 2, 1] = exp(pars[2])
+  diag(model$Q[3:dq, 3:dq, 1]) = exp(pars[3])
+  model
+}
+
+fit2 = fitSSM(mod_ucm2, init2, updt2) 
+
+fit2$optim.out$convergence
+```
+In questo caso la convergenza non restituisce il solito valore nullo. Osservando la documentazione della funzione `optim`, questo output corrisponde ad un problema dell'algoritmo di <b>Nelder–Mead</b>. Non è chiaro quale fosse il problema, fra le diverse combinazioni trovate, la soluzione migliore è stata quella di specificare i valori iniziali di $a1$ e $P1$ e di ridurre la dimensione del parametro `harmonics`. Il motivo del warning può essere attribuito ad un'eccessiva parametrizzazione del modello.
+
+```{r}
+mean_t = mean(l_train)
+var_t = var(l_train)
+
+mod_ucm2 = SSModel(l_train ~ 0 +
+                   SSMtrend(1, 0, a1 = mean_t, P1 = var_t) +
+                   SSMseasonal(24, NA, sea.type = "dummy", P1 = var_t) +
+                   SSMseasonal(168, NA, sea.type = "trig", harmonics = 1:8, P1 = var_t),
+                   H = NA)
+
+init2 = c(logvar_eps = log(100), logvar_om = log(20), logvar_om2 = log(50))
+
+updt2 = function(pars, model) {
+  dq = dim(model$Q)[1]
+  model$H[1, 1, 1] = exp(pars[1])
+  model$Q[2, 2, 1] = exp(pars[2])
+  diag(model$Q[3:dq, 3:dq, 1]) = exp(pars[3])
+  model
+}
+
+fit2 = fitSSM(mod_ucm2, init2, updt2)
+
+fit2$optim.out$convergence 
+```
+Questa volta la convergenza viene ottenuta. <br>
+
+Si applica nuovamente il <b>filtro di Kalman</b> e la somma delle componenti trigonometriche viene visualizzata.
+```{r}
+smo2 = KFS(fit2$model, smoothing = 'state')
+
+plot(xts(rowSums(smo2$alphahat[, paste0("sea_trig", 1:8)]),
+                 order.by = as.POSIXct(energy$time[1:(cutoff_id)-1], format = "%Y-%m-%d %H:%M:%S")),
+     type = "l", main = 'Weekly seasonality') 
+```
+<br>
+La somma delle componenti è deterministica ma sembra essersi ottenuto l'effetto desiderato con dei picchi evidenti sia in positivo che in negativo. <br>
+
+```{r}
+pred_ucm2 = predict(fit2$model, n.ahead = dim(l_test)[1])
+forecast_ucm2 = xts(pred_ucm2, order.by = index(plot_test))
+
+lines4 = cbind(plot_train, plot_test, forecast_ucm2)
+dygraph(lines, main = "Hourly log(energy) used (in Wh) - UCM (daily + weekly seasonals)") %>%
+  dySeries("Train", color = "green") %>%
+  dySeries("Test", color = "blue") %>%
+  dySeries("forecast", color = "red") %>%
+  dyRangeSelector()
+```
+Il grafico tuttavia non mostra una variazione importante rispetto al modello precedente. <br>
+
+Come per i modelli ARIMA, il confronto viene effettuato ancora una volta con il MAE.
+``` {r}
+MAE(pred_ucm, as.vector(l_test)); MAE(exp(pred_ucm), as.vector(exp(l_test)))
+MAE(pred_ucm2, as.vector(l_test)); MAE(exp(pred_ucm2), as.vector(exp(l_test)))
+```
+Anche se visivamente non c'erano stati cambiamenti, il secondo modello ottiene delle performance migliori rispetto al primo, la componente stagionale settimanale aiuta quindi a ridurre l'errore di previsione. <br><br><br>
+
+
+# 4. Machine Learning
+Come parte di machine learning l'approccio seguito è quello dei <b>kNN</b> (<i>kNearest Neighour</i>) presente nel pacchetto `tsfknn`. L'algoritmo per la previsione richiede in input, oltre alla serie storica di riferimento, i seguenti parametri:
+
+* `h`: il numero di osservazioni da predire
+* `lags`: i lag da considerare
+* `k`: il numero di vicini (numero consigliato di default è la radice quadrata della dimensione del train)
+* `msas`: strategia
+
+Come primo modello si utilizza un lag di $24$ osservazioni ed il numero di vicini consigliato con la strategia <b>MIMO</b> (<i>Multiple Inputs Multiple Outputs</i>).
+```{r}
+knn = knn_forecasting(ts(l_train), h = dim(l_test)[1], lags = 1:24, k = floor(sqrt(dim(l_train)[1])), msas = "MIMO")
+autoplot(knn, highlight = "neighbors", faceting = FALSE)
+```
+<br>
+Il risultato è molto simile a quello dei modelli ottenuti in precedenza, c'è sempre il problema dei picchi. <br>
+
+Creando diversi modelli al variare del numero dei vicini si è notato che al diminuire del numero dei vicini, la previsione sembrava cogliere meglio i picchi. Di seguito sono riportati i grafici delle previsioni con rispettivamente $3$ e $5$ vicini.
+```{r}
+knn3 = knn_forecasting(ts(l_train), h = dim(l_test)[1], lags = 1:24, k = 3, msas = "MIMO")
+plot3 = autoplot(knn3, highlight = "neighbors", faceting = FALSE)
+
+knn5 = knn_forecasting(ts(l_train), h = dim(l_test)[1], lags = 1:24, k = 5, msas = "MIMO")
+plot5 = autoplot(knn5, highlight = "neighbors", faceting = FALSE)
+
+grid.arrange(arrangeGrob(plot3, top='kNN model with k=3'), arrangeGrob(plot5, top='kNN model with k=5'), ncol = 1)
+```
+<br>
+Sono calcolati i MAE dei tre modelli creati.
+``` {r}
+MAE(exp(knn$prediction), as.vector(exp(l_test)))
+MAE(exp(knn3$prediction), as.vector(exp(l_test)))
+MAE(exp(knn5$prediction), as.vector(exp(l_test)))
+```
+Confrontando i <b>MAE</b> dei modelli, il primo modello risulta di gran lunga il migliore. <br> 
+
+Il seguente plot mostra come varia il <b>MAE</b> a seconda del numero dei vicini selezionati.
+```{r}
+mae_vec = c()
+for (i in 1:floor(sqrt(dim(l_train)[1]))){
+  knn = knn_forecasting(ts(l_train), h = dim(l_test)[1], lags = 1:24, k = i, msas = "MIMO")
+  mae_vec = append(mae_vec, MAE(exp(knn$prediction), as.vector(exp(l_test))))
+}
+plot(mae_vec, type = "l", ylab= "MAE", xlab = "k", main = "MAE on test set at different k values")
+abline(h = min(mae_vec), col = "red", lwd = 0.7)
+```
+<br>
+Effettivamente il <b>MAE</b> cala progressivamente fino ad assestarsi intorno a $220$, con il minimo ottenuto dal modello con $41$ vicini. <br>
+
+Viene quindi proposta una rappresentazione delle previsioni con il modello a $41$ vicini che è quello che minimizza il MAE all'interno della famiglia <b>kNN</b>.
+```{r}
+knn41 = knn_forecasting(ts(l_train), h = dim(l_test)[1], lags = 1:24, k = 41, msas = "MIMO")
+
+forecast_knn41 = xts(knn41$prediction, order.by = index(plot_test))
+names(forecast_knn41) = "knn41"
+
+lines6 = cbind(plot_train, plot_test, forecast_knn41)
+dygraph(lines6, main = "Hourly log(energy) used (in Wh) - kNN (k=41)") %>%
+  dySeries("Train", color = "green") %>%
+  dySeries("Test", color = "blue") %>%
+  dySeries("knn41", color = "red") %>%
+  dyRangeSelector()
+```
+<br>
+```{r}
+MAE(knn41$prediction, as.vector(l_test))
+MAE(exp(knn41$prediction), as.vector(exp(l_test)))
+```
+<br>
+Per questa tecnica sono stati provati altri diversi modelli. Una soluzione interessante offerta dall'algoritmo era qualla di poter combinare le previsioni di più modelli: specificando all'interno del parametro `k` un vettore era possibile crearne di diversi le cui stime erano mediate per ottenere una nuova previsione. L'obiettivo era quello di combinare l'abilità dei modelli a pochi vicini di trovare i picchi con quelli con più vicini che si adattavano meglio alla serie. <br>
+Dalle analisi del MAE nessuna combinazione è risultata avvicinarsi alle previsioni del modello a $41$ vicini. <br>
+In conclusione il modello migliore in assoluto risulta quello UCM seguito da quello ARIMA ed infine kNN.
